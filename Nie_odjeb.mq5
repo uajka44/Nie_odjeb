@@ -72,7 +72,11 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTimer()
 {
+    // Sprawdzenie pozycji pod kątem maksymalnej straty
     PositionManager_CheckAllPositionsForMaxLoss();
+    
+    // Monitoring przerwy (działa tylko podczas przerwy)
+    BreakManager_MonitorAndBlockTrades();
 }
 
 //+------------------------------------------------------------------+
@@ -101,6 +105,9 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeRequest& request, const MqlTradeResult& result)
 {
+    // NAJPIERW: Sprawdzenie czy nowa transakcja narusza przerwę
+    BreakManager_CheckNewTransaction(trans);
+    
     // Obsługa zamknięcia pozycji - zarządzanie przerwami
     if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
     {

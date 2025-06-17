@@ -6,6 +6,7 @@
 #ifndef BREAKMANAGER_MQH
 #define BREAKMANAGER_MQH
 
+#include <Trade\Trade.mqh>
 #include "Config.mqh"
 #include "DataStructures.mqh"
 
@@ -13,6 +14,8 @@
 ClosedPosition g_lastPositions[3];
 datetime g_przerwa_do = 0;
 bool g_mozna_wykonac_trade = true;
+string g_break_reason = ""; // Powód przerwy
+bool g_break_alert_shown = false; // Czy alert jest już wyświetlony
 
 //+------------------------------------------------------------------+
 //| Inicjalizacja zarządzania przerwami                              |
@@ -74,6 +77,8 @@ void BreakManager_CheckDailyLimits()
     {
         g_przerwa_do = endOfDay;
         g_mozna_wykonac_trade = false;
+        g_break_reason = "dzienny limit strat";
+        g_break_alert_shown = false;
         
         Print("UWAGA: Osiągnięto dzienny limit strat!");
         MessageBox("UWAGA: Osiągnięto dzienny limit strat!");
@@ -174,6 +179,8 @@ bool BreakManager_CheckLossStreak()
         {
             g_przerwa_do = g_lastPositions[0].closeTime + Config_GetBreak2Losses() * 60;
             g_mozna_wykonac_trade = false;
+            g_break_reason = "2 kolejne straty";
+            g_break_alert_shown = false;
             Print("UWAGA: Przerwa w tradingu na ", Config_GetBreak2Losses(), " minut z powodu 2 kolejnych strat!");
             return true;
         }
@@ -188,6 +195,8 @@ bool BreakManager_CheckLossStreak()
         {
             g_przerwa_do = g_lastPositions[0].closeTime + Config_GetBreak3Losses() * 60;
             g_mozna_wykonac_trade = false;
+            g_break_reason = "3 kolejne straty";
+            g_break_alert_shown = false;
             Print("UWAGA: Przerwa w tradingu na ", Config_GetBreak3Losses(), " minut z powodu 3 kolejnych strat!");
             return true;
         }
@@ -278,6 +287,166 @@ void BreakManager_HandleClosedPosition()
     
     // Zapisanie do której mamy przerwę do pliku csv
     BreakManager_SaveDateToCSV(g_przerwa_do);
+}
+
+//+------------------------------------------------------------------+
+//| Wyświetlenie alertu o przerwie                                  |
+//+------------------------------------------------------------------+
+void BreakManager_ShowBreakAlert(string action)
+{
+    if(!g_break_alert_shown)
+    {
+        // Dźwięk ostrzegawczy
+        PlaySound("alert.wav");
+        
+        // Aktualizacja flagi
+        g_break_alert_shown = true;
+    }
+    
+    // Przygotowanie tekstu alertu
+    string alertText = "\n\n\n=== TRADING ZABLOKOWANY ===\n";
+    alertText += action + "\n";
+    alertText += "Powód: " + g_break_reason + "\n";
+    alertText += "Koniec przerwy: " + TimeToString(g_przerwa_do, TIME_DATE|TIME_MINUTES) + "\n";
+    
+    datetime teraz = TimeCurrent();
+    int pozostalo_minut = (int)((g_przerwa_do - teraz) / 60);
+    if(pozostalo_minut > 0)
+    {
+        alertText += "Pozostało: " + IntegerToString(pozostalo_minut) + " minut\n";
+    }
+    alertText += "==========================";
+    
+    // Wyświetlenie na wykresie (nieblokujące)
+    Comment(alertText);
+    
+    // Log w dzienniku
+    Print("*** TRADING ZABLOKOWANY *** ", action, " - ", g_break_reason, " do ", TimeToString(g_przerwa_do));
+}
+
+//+------------------------------------------------------------------+
+//| Monitoring i usuwanie pozycji/zleceń podczas przerwy            |
+//+------------------------------------------------------------------+
+void BreakManager_MonitorAndBlockTrades()
+{
+    // Monitoring działa tylko podczas przerwy
+    if(g_mozna_wykonac_trade) 
+    {
+        // Jeśli przerwa się zakończyła, czyścimy alert
+        if(g_break_alert_shown)
+        {
+            Comment(""); // Usunięcie tekstu z wykresu
+            g_break_alert_shown = false;
+            g_break_reason = "";
+            Print("Przerwa zakończona - trading odblokowany");
+        }
+        return;
+    }
+    
+    datetime teraz = TimeCurrent();
+    
+    // Sprawdzenie czy przerwa już minęła
+    if(teraz >= g_przerwa_do)
+    {
+        g_mozna_wykonac_trade = true;
+        Comment(""); // Usunięcie tekstu z wykresu
+        g_break_alert_shown = false;
+        g_break_reason = "";
+        Print("Przerwa automatycznie zakończona - trading odblokowany");
+        return;
+    }
+    
+    // Jeśteesmy w przerwie - sprawdzamy pozycje i zlecenia
+    CTrade trade;
+    bool foundViolation = false;
+    
+    // 1. Sprawdzenie otwartych pozycji
+    int totalPositions = PositionsTotal();
+    for(int i = totalPositions - 1; i >= 0; i--)
+    {
+        ulong positionTicket = PositionGetTicket(i);
+        if(positionTicket > 0)
+        {
+            string symbol = PositionGetString(POSITION_SYMBOL);
+            datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+            
+            // Jeśli pozycja została otwarta podczas przerwy
+            if(openTime >= (g_przerwa_do - Config_GetBreak2Losses() * 60))
+            {
+                if(trade.PositionClose(positionTicket))
+                {
+                    BreakManager_ShowBreakAlert("Usunięto pozycję: " + symbol);
+                    foundViolation = true;
+                }
+            }
+        }
+    }
+    
+    // 2. Sprawdzenie oczekujących zleceń
+    int totalOrders = OrdersTotal();
+    for(int i = totalOrders - 1; i >= 0; i--)
+    {
+        ulong orderTicket = OrderGetTicket(i);
+        if(orderTicket > 0)
+        {
+            string symbol = OrderGetString(ORDER_SYMBOL);
+            datetime setupTime = (datetime)OrderGetInteger(ORDER_TIME_SETUP);
+            
+            // Jeśli zlecenie zostało złożone podczas przerwy
+            if(setupTime >= (g_przerwa_do - Config_GetBreak2Losses() * 60))
+            {
+                if(trade.OrderDelete(orderTicket))
+                {
+                    BreakManager_ShowBreakAlert("Usunięto zlecenie: " + symbol);
+                    foundViolation = true;
+                }
+            }
+        }
+    }
+    
+    // 3. Wyświetlenie ciągłego alertu o przerwie (co 30 sekund)
+    static datetime lastAlertTime = 0;
+    if(teraz - lastAlertTime >= 30)
+    {
+        BreakManager_ShowBreakAlert("PRZERWA W TRADINGU");
+        lastAlertTime = teraz;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Sprawdzenie czy nowa transakcja narusza przerwę                  |
+//+------------------------------------------------------------------+
+void BreakManager_CheckNewTransaction(const MqlTradeTransaction& trans)
+{
+    // Jeśli nie ma przerwy, nic nie robimy
+    if(g_mozna_wykonac_trade) return;
+    
+    datetime teraz = TimeCurrent();
+    
+    // Sprawdzenie czy przerwa już minęła
+    if(teraz >= g_przerwa_do)
+    {
+        g_mozna_wykonac_trade = true;
+        Comment("");
+        g_break_alert_shown = false;
+        g_break_reason = "";
+        return;
+    }
+    
+    // Reagujemy na nowe pozycje i zlecenia
+    if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+    {
+        if(trans.deal_type == DEAL_TYPE_BUY || trans.deal_type == DEAL_TYPE_SELL)
+        {
+            // Uruchomienie pełnego monitoringu (sprawdzi i usunie jeśli trzeba)
+            BreakManager_MonitorAndBlockTrades();
+        }
+    }
+    else if(trans.type == TRADE_TRANSACTION_ORDER_ADD)
+    {
+        // Uruchomienie pełnego monitoringu (sprawdzi i usunie jeśli trzeba)
+        BreakManager_MonitorAndBlockTrades();
+    }
 }
 
 #endif // BREAKMANAGER_MQH
