@@ -95,6 +95,18 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
                     DatabaseManager_ExportCandles();
                     break;
                 }
+                case 80:   // klawisz p - statystyki pozycji (P jak positions)
+                {
+                    DatabaseManager_PrintStats();
+                    break;
+                }
+                case 77:   // klawisz m - sprawdź brakujące pozycje (M jak missing)
+                {
+                    Print("=== RĘCZNE SPRAWDZENIE BRAKUJĄCYCH POZYCJI ===");
+                    DatabaseManager_SaveMissingPositions();
+                    DatabaseManager_PrintStats();
+                    break;
+                }
             }
         }
     }
@@ -108,16 +120,31 @@ void OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeRequest&
     // NAJPIERW: Sprawdzenie czy nowa transakcja narusza przerwę
     BreakManager_CheckNewTransaction(trans);
     
-    // Obsługa zamknięcia pozycji - zarządzanie przerwami
+    // Obsługa zamknięcia pozycji - zarządzanie przerwami I ZAPIS DO BAZY
     if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
     {
         ulong dealTicket = trans.deal;
         if(dealTicket > 0 && HistoryDealSelect(dealTicket))
         {
-            if(HistoryDealGetInteger(dealTicket, DEAL_ENTRY) == DEAL_ENTRY_OUT)
+            long dealEntry = HistoryDealGetInteger(dealTicket, DEAL_ENTRY);
+            
+            if(dealEntry == DEAL_ENTRY_OUT)
             {
-                Print("OnTradeTransaction: Wykryto zamkniętą transakcję");
+                Print("OnTradeTransaction: Wykryto zamkniętą transakcję - zapisuję do bazy");
+                
+                // NOWA FUNKCJONALNOŚĆ: Zapisz pozycję do bazy danych
+                DatabaseManager_HandleClosedPosition();
+                
+                // Istniejąca funkcjonalność: zarządzanie przerwami
                 BreakManager_HandleClosedPosition();
+            }
+            else if(dealEntry == DEAL_ENTRY_IN)
+            {
+                Print("OnTradeTransaction: Wykryto otwarcie pozycji - sprawdzam SL");
+                
+                // NOWA FUNKCJONALNOŚĆ: Zapisz SL z nowo otwartej pozycji (jeśli z limitu)
+                long positionId = HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+                DatabaseManager_HandleOpenedPosition(positionId);
             }
         }
     }

@@ -95,6 +95,8 @@ Program został podzielony na modularne komponenty dla lepszej czytelności i ł
 
 ### Zdarzenia klawiatury (OnChartEvent)
 - Klawisz 'j': Eksport świeczek do bazy danych
+- Klawisz 'p': Wyświetl statystyki pozycji w bazie danych
+- Klawisz 'm': Ręczne sprawdzenie i zapis brakujących pozycji
 
 ### Transakcje (OnTradeTransaction)
 - Obsługa zamkniętych pozycji (zarządzanie przerwami)
@@ -121,8 +123,12 @@ Program został podzielony na modularne komponenty dla lepszej czytelności i ł
 
 ### 4. Eksport danych
 - Eksport świeczek minutowych do bazy SQLite
+- **NOWE: Automatyczny zapis zamkniętych pozycji do bazy danych**
+- **NOWE: Śledzenie stop loss w momencie wypełniania limitów**
+- **NOWE: Kolumna 'sl_recznie' przechowuje SL (jako cenę) z momentów otwarcia pozycji z limitów**
 - Obsługa wielu instrumentów jednocześnie
 - Incremental update (tylko nowe dane)
+- Sprawdzanie i uzupełnianie pominiętych pozycji
 
 ## Konfiguracja instrumentów
 
@@ -142,7 +148,11 @@ Program obsługuje następujące instrumenty z predefiniowanymi ustawieniami:
 5. **Ponowne użycie**: Moduły można wykorzystać w innych projektach
 
 ## Pliki wygenerowane przez EA
-- **multi_candles.db**: Baza danych SQLite ze świeczkami
+- **multi_candles.db**: Baza danych SQLite ze świeczkami i pozycjami
+  - Tabele dla świeczek: `[SYMBOL]` (np. `BTCUSD`, `US30.cash`)
+  - **NOWA TABELA: `positions`** - zamknięte pozycje z pełnymi danymi
+    - Zawiera wszystkie szczegóły pozycji: czas otwarcia/zamknięcia, ceny, SL/TP, commission, swap, profit
+    - **Kolumna `sl_recznie`**: przechowuje stop loss z momentów ustawiania zleceń limit
 - **przerwa_do.csv**: Plik z informacją o czasie końca przerwy w tradingu
 
 ## Uwagi techniczne
@@ -150,3 +160,16 @@ Program obsługuje następujące instrumenty z predefiniowanymi ustawieniami:
 - Wszystkie funkcje są poprzedzone prefiksem nazwy modułu dla uniknięcia konfliktów
 - Używane są globalne zmienne z prefiksem g_ dla jasnego oznaczenia zasięgu
 - Include guards (#ifndef/#define/#endif) zapobiegają wielokrotnemu dołączaniu plików
+- **WYDAJNOŚĆ**: Funkcje zapisu pozycji są zoptymalizowane - sprawdzają tylko nowe pozycje i nie powielają już zapisanych
+
+## Instrukcje obsługi nowych funkcji pozycji
+
+1. **Automatyczny zapis pozycji**: Działa automatycznie przy każdym zamknięciu pozycji
+2. **Śledzenie SL z limitów**: 
+   - Ustaw zlecenie limit z stop loss
+   - Możesz modyfikować SL aż do momentu wypełnienia zlecenia
+   - **W momencie wypełnienia pozycji limit** program automatycznie zapamięta aktualny SL
+   - Po zamknięciu pozycji SL zostanie zapisany w kolumnie `sl_recznie` (jako cena)
+3. **Ręczne sprawdzenie pozycji** (klawisz 'M'): Użyj gdy podejrzewasz, że jakieś pozycje nie zostały zapisane
+4. **Statystyki** (klawisz 'P'): Wyświetla liczbę pozycji w bazie i ostatnie 3 transakcje
+5. **Optymalizacja**: Program sprawdza tylko pozycje nowsze niż ostatnia w bazie (incremental update)
