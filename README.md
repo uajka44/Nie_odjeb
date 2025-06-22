@@ -97,6 +97,7 @@ Program został podzielony na modularne komponenty dla lepszej czytelności i ł
 - Klawisz 'j': Eksport świeczek do bazy danych
 - Klawisz 'p': Wyświetl statystyki pozycji w bazie danych
 - Klawisz 'm': Ręczne sprawdzenie i zapis brakujących pozycji
+- **NOWY** Klawisz 'g': Pokaż edytowaną pozycję na wykresie (integracja z dziennikiem Python)
 
 ### Transakcje (OnTradeTransaction)
 - Obsługa zamkniętych pozycji (zarządzanie przerwami)
@@ -129,6 +130,14 @@ Program został podzielony na modularne komponenty dla lepszej czytelności i ł
 - Obsługa wielu instrumentów jednocześnie
 - Incremental update (tylko nowe dane)
 - Sprawdzanie i uzupełnianie pominiętych pozycji
+
+### 5. **NOWE: Integracja z dziennikiem Python**
+- **Klawisz 'G'**: Przechodzi do wykresu aktualnie edytowanej pozycji w dzienniku Python
+- Odczyt ticket z pliku komunikacyjnego `E:\Trading\current_edit_ticket.txt`
+- Automatyczne przełączanie na właściwy wykres symbolu
+- Obsługa zarówno otwartych jak i zamkniętych pozycji
+- Wyświetlanie szczegółów pozycji w konsoli
+- Dodawanie komentarza na wykresie z informacją o edytowanej pozycji
 
 ## Konfiguracja instrumentów
 
@@ -172,4 +181,10 @@ Program obsługuje następujące instrumenty z predefiniowanymi ustawieniami:
    - Po zamknięciu pozycji SL zostanie zapisany w kolumnie `sl_recznie` (jako cena)
 3. **Ręczne sprawdzenie pozycji** (klawisz 'M'): Użyj gdy podejrzewasz, że jakieś pozycje nie zostały zapisane
 4. **Statystyki** (klawisz 'P'): Wyświetla liczbę pozycji w bazie i ostatnie 3 transakcje
-5. **Optymalizacja**: Program sprawdza tylko pozycje nowsze niż ostatnia w bazie (incremental update)
+5. **NOWE: Przejście do edytowanej pozycji** (klawisz 'G'):
+   - Upewnij się, że dziennik Python jest uruchomiony
+   - Otwórz pozycję do edycji w dzienniku (podwójne kliknięcie)
+   - W MetaTrader naciśnij klawisz 'G'
+   - Program automatycznie przejdzie do wykresu edytowanej pozycji
+   - Jeśli wykres nie jest otwarty, zostaniesz poinformowany o konieczności jego otwarcia
+6. **Optymalizacja**: Program sprawdza tylko pozycje nowsze niż ostatnia w bazie (incremental update)
