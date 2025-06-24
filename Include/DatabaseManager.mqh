@@ -15,16 +15,6 @@ int g_db_handle = INVALID_HANDLE;
 bool g_databaseReady = false;
 string g_symbolArray[];
 
-// Nowe zmienne dla pozycji
-struct PositionSLInfo 
-{
-    long ticket;
-    double initial_sl;
-    datetime time;
-};
-
-PositionSLInfo g_pending_positions[]; // Tablica do śledzenia SL pozycji limit
-
 //+------------------------------------------------------------------+
 //| Funkcje pomocnicze dla pozycji                                   |
 //+------------------------------------------------------------------+
@@ -60,70 +50,6 @@ string DatabaseManager_DealReasonToString(ENUM_DEAL_REASON deal_reason)
         case DEAL_REASON_SPLIT:    return ("split");
         default:
             return ("unknown");
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Zapisuje informacje o SL nowo otwartej pozycji                   |
-//+------------------------------------------------------------------+
-void DatabaseManager_RecordOpenedPositionSL(long positionId)
-{
-    if(!PositionSelectByTicket(positionId)) return;
-    
-    double sl = PositionGetDouble(POSITION_SL);
-    if(sl == 0) return; // Brak SL
-    
-    // Zapisz SL dla każdej pozycji z ustawionym SL
-    // (zakładamy że jeśli pozycja ma SL zaraz po otwarciu, to prawdopodobnie pochodzi z limitu)
-    int size = ArraySize(g_pending_positions);
-    ArrayResize(g_pending_positions, size + 1);
-    g_pending_positions[size].ticket = positionId;
-    g_pending_positions[size].initial_sl = sl;
-    g_pending_positions[size].time = TimeCurrent();
-    
-    DatabaseManager_PrintDebug("Zapisano SL dla nowej pozycji " + IntegerToString(positionId) + " SL: " + DoubleToString(sl, 5));
-}
-
-//+------------------------------------------------------------------+
-//| Pobiera zapisany SL dla pozycji                                  |
-//+------------------------------------------------------------------+
-double DatabaseManager_GetInitialSL(long ticket)
-{
-    for(int i = 0; i < ArraySize(g_pending_positions); i++)
-    {
-        if(g_pending_positions[i].ticket == ticket)
-        {
-            double sl = g_pending_positions[i].initial_sl;
-            // Usuń wpis po użyciu (opcjonalnie, żeby nie zaśmiecać pamięci)
-            for(int j = i; j < ArraySize(g_pending_positions) - 1; j++)
-            {
-                g_pending_positions[j] = g_pending_positions[j + 1];
-            }
-            ArrayResize(g_pending_positions, ArraySize(g_pending_positions) - 1);
-            return sl;
-        }
-    }
-    return 0; // Nie znaleziono
-}
-
-//+------------------------------------------------------------------+
-//| Czyszczenie starych wpisów pending pozycji (>24h)                |
-//+------------------------------------------------------------------+
-void DatabaseManager_CleanupOldPendingPositions()
-{
-    datetime cutoffTime = TimeCurrent() - 86400; // 24 godziny temu
-    
-    for(int i = ArraySize(g_pending_positions) - 1; i >= 0; i--)
-    {
-        if(g_pending_positions[i].time < cutoffTime)
-        {
-            // Usuń stary wpis
-            for(int j = i; j < ArraySize(g_pending_positions) - 1; j++)
-            {
-                g_pending_positions[j] = g_pending_positions[j + 1];
-            }
-            ArrayResize(g_pending_positions, ArraySize(g_pending_positions) - 1);
-        }
     }
 }
 
@@ -212,6 +138,21 @@ bool DatabaseManager_Init()
     }
 
     DatabaseManager_PrintDebug("✓ Tabela positions utworzona/sprawdzona");
+
+    // NOWA TABELA DLA SL W MOMENCIE OTWARCIA
+    string createOpeningSLSQL = "CREATE TABLE IF NOT EXISTS position_opening_sl ("
+                               "ticket INTEGER PRIMARY KEY,"
+                               "sl_opening REAL,"
+                               "opening_time INTEGER"
+                               ")";
+    
+    if(!DatabaseExecute(g_db_handle, createOpeningSLSQL))
+    {
+        DatabaseManager_LogError("Błąd tworzenia tabeli position_opening_sl: " + IntegerToString(GetLastError()), "DatabaseManager_Init");
+        return false;
+    }
+
+    DatabaseManager_PrintDebug("✓ Tabela position_opening_sl utworzona/sprawdzona");
 
     g_databaseReady = true;
     Print("Baza danych zainicjalizowana pomyślnie");
@@ -574,8 +515,8 @@ bool DatabaseManager_ProcessSinglePosition(long positionId)
             deal_in_ticket = IntegerToString(deal.Ticket());
             open_reason = HistoryDealGetInteger(deal.Ticket(), DEAL_REASON);
             
-            // SPRAWDŹ CZY TO BYŁA POZYCJA Z LIMITU - pobierz zapisany SL
-            sl_recznie = DatabaseManager_GetInitialSL(deal.Ticket());
+            // SL z pozycji z limitów będzie teraz w nowej tabeli position_opening_sl
+            sl_recznie = 0; // Pozostawiamy pustą kolumnę
         }
         else if(deal.Entry() == DEAL_ENTRY_OUT || deal.Entry() == DEAL_ENTRY_OUT_BY)
         {
@@ -663,6 +604,105 @@ bool DatabaseManager_ProcessSinglePosition(long positionId)
 }
 
 //+------------------------------------------------------------------+
+//| NOWA FUNKCJA: Zapisuje SL w momencie wypełnienia zlecenia limit   |
+//+------------------------------------------------------------------+
+bool DatabaseManager_SaveOpeningSL(long ticket, double sl_opening, datetime opening_time)
+{
+    if(!g_databaseReady || g_db_handle == INVALID_HANDLE)
+    {
+        DatabaseManager_LogError("Baza danych nie jest gotowa", "DatabaseManager_SaveOpeningSL");
+        return false;
+    }
+    
+    if(sl_opening <= 0)
+    {
+        DatabaseManager_PrintDebug("Pomijam zapis SL dla ticket " + IntegerToString(ticket) + " - SL wynosi 0");
+        return true; // Nie zapisujemy pozycji bez SL
+    }
+    
+    // Sprawdź czy już istnieje wpis dla tego ticketu
+    int checkRequest = DatabasePrepare(g_db_handle, StringFormat("SELECT COUNT(*) FROM position_opening_sl WHERE ticket = %d", ticket));
+    if(checkRequest != INVALID_HANDLE)
+    {
+        if(DatabaseRead(checkRequest))
+        {
+            long count;
+            if(DatabaseColumnLong(checkRequest, 0, count) && count > 0)
+            {
+                DatabaseFinalize(checkRequest);
+                DatabaseManager_PrintDebug("SL dla ticket " + IntegerToString(ticket) + " już zapisany");
+                return true; // Już istnieje
+            }
+        }
+        DatabaseFinalize(checkRequest);
+    }
+    
+    // Zapisz SL do tabeli
+    string insertSQL = StringFormat(
+        "INSERT INTO position_opening_sl (ticket, sl_opening, opening_time) VALUES (%d, %.5f, %d)",
+        ticket,
+        sl_opening,
+        (long)opening_time
+    );
+    
+    if(!DatabaseExecute(g_db_handle, insertSQL))
+    {
+        DatabaseManager_LogError("Błąd zapisu SL dla ticket " + IntegerToString(ticket) + ": " + IntegerToString(GetLastError()), "DatabaseManager_SaveOpeningSL");
+        return false;
+    }
+    
+    DatabaseManager_PrintDebug("✓ Zapisano SL otwarcia: Ticket=" + IntegerToString(ticket) + " SL=" + DoubleToString(sl_opening, 5) + " Time=" + TimeToString(opening_time));
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| NOWA FUNKCJA: Pobiera SL z momentu otwarcia                     |
+//+------------------------------------------------------------------+
+double DatabaseManager_GetOpeningSL(long ticket)
+{
+    if(!g_databaseReady || g_db_handle == INVALID_HANDLE)
+    {
+        return 0;
+    }
+    
+    int request = DatabasePrepare(g_db_handle, StringFormat("SELECT sl_opening FROM position_opening_sl WHERE ticket = %d", ticket));
+    if(request == INVALID_HANDLE)
+    {
+        return 0;
+    }
+    
+    double sl_opening = 0;
+    if(DatabaseRead(request))
+    {
+        DatabaseColumnDouble(request, 0, sl_opening);
+    }
+    
+    DatabaseFinalize(request);
+    return sl_opening;
+}
+
+//+------------------------------------------------------------------+
+//| NOWA FUNKCJA: Czyszczenie starych wpisów SL (>30 dni)           |
+//+------------------------------------------------------------------+
+void DatabaseManager_CleanupOldOpeningSL()
+{
+    if(!g_databaseReady || g_db_handle == INVALID_HANDLE)
+    {
+        return;
+    }
+    
+    // Usuń wpisy starsze niż 30 dni
+    datetime cutoffTime = TimeCurrent() - (30 * 24 * 3600);
+    
+    string deleteSQL = StringFormat("DELETE FROM position_opening_sl WHERE opening_time < %d", (long)cutoffTime);
+    
+    if(DatabaseExecute(g_db_handle, deleteSQL))
+    {
+        DatabaseManager_PrintDebug("Wyczyszczono stare wpisy SL otwarcia");
+    }
+}
+
+//+------------------------------------------------------------------+
 //| NOWA FUNKCJA: Obsługa zamkniętej pozycji w OnTradeTransaction    |
 //+------------------------------------------------------------------+
 void DatabaseManager_HandleClosedPosition()
@@ -675,22 +715,82 @@ void DatabaseManager_HandleClosedPosition()
     // Sprawdź czy nie pominęliśmy jakiejś pozycji wcześniej
     DatabaseManager_SaveMissingPositions();
     
-    // Wyczyść stare wpisy pending pozycji co jakiś czas
-    static datetime lastCleanup = 0;
-    if(TimeCurrent() - lastCleanup > 3600) // Co godzinę
-    {
-        DatabaseManager_CleanupOldPendingPositions();
-        lastCleanup = TimeCurrent();
-    }
+    // Automatyczne czyszczenie wyłączone - dane będą przechowywane do analizy
+    // Jeśli potrzebujesz wyczyścić stare dane, użyj ręcznie: DatabaseManager_CleanupOldOpeningSL()
 }
 
 //+------------------------------------------------------------------+
-//| NOWA FUNKCJA: Obsługa nowo otwartej pozycji                    |
+//| NOWA FUNKCJA: Obsługa nowo otwartej pozycji (TYLKO LIMIT ORDERS)|
 //+------------------------------------------------------------------+
 void DatabaseManager_HandleOpenedPosition(long positionId)
 {
-    // Zapisz SL jeśli pozycja ma ustawiony od razu (prawdopodobnie z limitu)
-    DatabaseManager_RecordOpenedPositionSL(positionId);
+    if(!PositionSelectByTicket(positionId))
+    {
+        DatabaseManager_PrintDebug("Nie można wybrać pozycji " + IntegerToString(positionId));
+        return;
+    }
+    
+    double sl = PositionGetDouble(POSITION_SL);
+    datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+    
+    // Sprawdzamy czy to może być pozycja z limitu
+    if(sl <= 0)
+    {
+        DatabaseManager_PrintDebug("Pozycja " + IntegerToString(positionId) + " otwarta bez SL - pomijam");
+        return; // Pozycje z limitów mają SL od razu
+    }
+    
+    // Sprawdź historię tej pozycji żeby zobaczyć jak została otwarta
+    if(!HistorySelectByPosition(positionId))
+    {
+        DatabaseManager_PrintDebug("Nie można wybrać historii pozycji " + IntegerToString(positionId));
+        return;
+    }
+    
+    int deals = HistoryDealsTotal();
+    bool isFromLimit = false;
+    
+    // Sprawdź czy deal otwarcia ma charakterystykę limitu
+    for(int i = 0; i < deals; i++)
+    {
+        CDealInfo deal;
+        if(!deal.SelectByIndex(i)) continue;
+        
+        if(deal.Entry() == DEAL_ENTRY_IN)
+        {
+            // Pozycja z limitu ma zwykle:
+            // 1. SL ustawiony od razu
+            // 2. Może mieć specjalny komentarz lub powód
+            // 3. Cena otwarcia różna od bieżącej ceny rynkowej
+            
+            string comment = deal.Comment();
+            ENUM_DEAL_REASON reason = (ENUM_DEAL_REASON)HistoryDealGetInteger(deal.Ticket(), DEAL_REASON);
+            
+            // Heurystyka: pozycja z SL od razu + możliwe źródło z limitu
+            if(sl > 0)
+            {
+                // Jeśli ma SL od razu, prawdopodobnie to limit
+                isFromLimit = true;
+                
+                DatabaseManager_PrintDebug("Pozycja " + IntegerToString(positionId) + " prawdopodobnie z limitu:");
+                DatabaseManager_PrintDebug("- SL: " + DoubleToString(sl, 5));
+                DatabaseManager_PrintDebug("- Komentarz: '" + comment + "'");
+                DatabaseManager_PrintDebug("- Powód: " + DatabaseManager_DealReasonToString(reason));
+            }
+            break;
+        }
+    }
+    
+    if(isFromLimit)
+    {
+        // Zapisz SL do nowej tabeli
+        DatabaseManager_SaveOpeningSL(positionId, sl, openTime);
+        DatabaseManager_PrintDebug("✓ ZAPISANO SL z pozycji limit: Ticket=" + IntegerToString(positionId) + " SL=" + DoubleToString(sl, 5));
+    }
+    else
+    {
+        DatabaseManager_PrintDebug("Pozycja " + IntegerToString(positionId) + " nie wydaje się być z limitu - pomijam");
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -741,6 +841,43 @@ void DatabaseManager_PrintStats()
             DatabaseManager_PrintDebug("ID:" + IntegerToString(id) + " " + symbol + " " + type + " Profit:" + DoubleToString(profit, 2) + sl_info);
         }
         DatabaseFinalize(dataReq);
+    }
+    
+    // Statystyki tabeli position_opening_sl
+    int slRequest = DatabasePrepare(g_db_handle, "SELECT COUNT(*) FROM position_opening_sl");
+    if(slRequest != INVALID_HANDLE)
+    {
+        if(DatabaseRead(slRequest))
+        {
+            long slCount;
+            if(DatabaseColumnLong(slRequest, 0, slCount))
+            {
+                DatabaseManager_PrintDebug("Zapisanych SL otwarcia: " + IntegerToString(slCount));
+            }
+        }
+        DatabaseFinalize(slRequest);
+    }
+    
+    // Pokaż ostatnie 3 SL z otwarcia
+    int slDataReq = DatabasePrepare(g_db_handle, 
+        "SELECT ticket, sl_opening, opening_time FROM position_opening_sl ORDER BY opening_time DESC LIMIT 3");
+    
+    if(slDataReq != INVALID_HANDLE)
+    {
+        DatabaseManager_PrintDebug("=== OSTATNIE 3 SL OTWARCIA ===");
+        while(DatabaseRead(slDataReq))
+        {
+            long ticket;
+            double sl_opening;
+            long opening_time;
+            
+            DatabaseColumnLong(slDataReq, 0, ticket);
+            DatabaseColumnDouble(slDataReq, 1, sl_opening);
+            DatabaseColumnLong(slDataReq, 2, opening_time);
+            
+            DatabaseManager_PrintDebug("Ticket:" + IntegerToString(ticket) + " SL:" + DoubleToString(sl_opening, 5) + " Time:" + TimeToString((datetime)opening_time));
+        }
+        DatabaseFinalize(slDataReq);
     }
 }
 
