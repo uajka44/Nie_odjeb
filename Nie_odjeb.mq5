@@ -77,6 +77,8 @@ void OnTimer()
     
     // Monitoring przerwy (działa tylko podczas przerwy)
     BreakManager_MonitorAndBlockTrades();
+    
+    // Usunięto: CheckAndRemoveExpiredDots() - już nie potrzebne
 }
 
 //+------------------------------------------------------------------+
@@ -187,7 +189,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeRequest&
 }
 
 //+------------------------------------------------------------------+
-//| Pokaż edytowaną pozycję na wykresie (klawisz G)                    |
+//| Pokaż edytowaną pozycję na wykresie (klawisz G) - POPRAWIONA       |
 //+------------------------------------------------------------------+
 void ShowEditedPositionOnChart()
 {
@@ -214,6 +216,7 @@ void ShowEditedPositionOnChart()
         double sl = PositionGetDouble(POSITION_SL);
         double tp = PositionGetDouble(POSITION_TP);
         double profit = PositionGetDouble(POSITION_PROFIT);
+        datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
         ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
         
         Print("[G] ✅ POZYCJA OTWARTA:");
@@ -225,9 +228,10 @@ void ShowEditedPositionOnChart()
         Print("[G] SL: ", (sl > 0 ? DoubleToString(sl, _Digits) : "BRAK"));
         Print("[G] TP: ", (tp > 0 ? DoubleToString(tp, _Digits) : "BRAK"));
         Print("[G] Profit: ", DoubleToString(profit, 2));
+        Print("[G] Czas otwarcia: ", TimeToString(openTime));
         
-        // Przejdź do wykresu symbolu
-        SwitchToSymbolChart(symbol, ticket);
+        // Przejdź do wykresu symbolu i przesuń do czasu otwarcia
+        SwitchToSymbolChartAndNavigate(symbol, ticket, openTime);
     }
     else
     {
@@ -251,8 +255,8 @@ void ShowEditedPositionOnChart()
                             string symbol = HistoryDealGetString(deal_ticket, DEAL_SYMBOL);
                             double volume = HistoryDealGetDouble(deal_ticket, DEAL_VOLUME);
                             double price = HistoryDealGetDouble(deal_ticket, DEAL_PRICE);
-                            ENUM_DEAL_TYPE deal_type = (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal_ticket, DEAL_TYPE);
                             datetime time = (datetime)HistoryDealGetInteger(deal_ticket, DEAL_TIME);
+                            ENUM_DEAL_TYPE deal_type = (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal_ticket, DEAL_TYPE);
                             
                             Print("[G] 📊 POZYCJA Z HISTORII:");
                             Print("[G] Symbol: ", symbol);
@@ -261,8 +265,8 @@ void ShowEditedPositionOnChart()
                             Print("[G] Cena otwarcia: ", DoubleToString(price, _Digits));
                             Print("[G] Czas otwarcia: ", TimeToString(time));
                             
-                            // Przejdź do wykresu symbolu
-                            SwitchToSymbolChart(symbol, ticket);
+                            // Przejdź do wykresu symbolu i przesuń do czasu otwarcia
+                            SwitchToSymbolChartAndNavigate(symbol, ticket, time);
                             return;
                         }
                     }
@@ -276,9 +280,9 @@ void ShowEditedPositionOnChart()
 }
 
 //+------------------------------------------------------------------+
-//| Przełącz na wykres symbolu                                         |
+//| Przełącz na wykres symbolu i nawiguj do czasu pozycji              |
 //+------------------------------------------------------------------+
-void SwitchToSymbolChart(string symbol, long ticket)
+void SwitchToSymbolChartAndNavigate(string symbol, long ticket, datetime openTime)
 {
     Print("[G] 📈 Przeszukuję otwarte wykresy dla symbolu: ", symbol);
     
@@ -297,9 +301,19 @@ void SwitchToSymbolChart(string symbol, long ticket)
             {
                 Print("[G] ✅ Przełączono na wykres: ", symbol, " (Ticket: ", ticket, ")");
                 
-                // Dodatkowe info dla użytkownika
-                string comment = "Edytowana pozycja:\nTicket: " + IntegerToString(ticket) + "\nSymbol: " + symbol;
+                // NOWA FUNKCJONALNOŚĆ: Przesuń wykres do czasu otwarcia pozycji
+                if(NavigateChartToTime(chartId, openTime))
+                {
+                    Print("[G] 🎯 Wykres przesunięty do czasu otwarcia: ", TimeToString(openTime));
+                }
+                
+                // Dodaj komentarz z informacją o pozycji
+                string comment = StringFormat("Edytowana pozycja:\nTicket: %d\nSymbol: %s\nCzas otwarcia: %s", 
+                                             ticket, symbol, TimeToString(openTime));
                 ChartSetString(chartId, CHART_COMMENT, comment);
+                
+                // Dodaj linię pionową na czas otwarcia (opcjonalnie)
+                AddVerticalLineAtTime(chartId, openTime, ticket);
                 
                 // Odrysuj wykres
                 ChartRedraw(chartId);
@@ -318,7 +332,8 @@ void SwitchToSymbolChart(string symbol, long ticket)
         Print("[G] 💡 Otwórz wykres ", symbol, " i spróbuj ponownie");
         
         // Opcjonalnie: spróbuj otworzyć nowy wykres (wymaga dodatkowych uprawnień)
-        // ChartOpen(symbol, PERIOD_CURRENT);
+        // long newChartId = ChartOpen(symbol, PERIOD_CURRENT);
+        // if(newChartId > 0) NavigateChartToTime(newChartId, openTime);
     }
 }
 
@@ -409,5 +424,195 @@ void UpdateMQL5Heartbeat(int db_handle)
     if(!DatabaseExecute(db_handle, update_query))
     {
         // Nie logujemy błędu - to nie jest krytyczne
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Nawiguj wykres do określonego czasu                               |
+//+------------------------------------------------------------------+
+bool NavigateChartToTime(long chartId, datetime targetTime)
+{
+    // Sprawdź czy czas jest w przyszłości
+    datetime currentTime = TimeCurrent();
+    if(targetTime > currentTime)
+    {
+        Print("[G] ⚠️ Czas otwarcia pozycji jest w przyszłości - używam czasu bieżącego");
+        targetTime = currentTime;
+    }
+    
+    // Pobierz informacje o wykresie
+    ENUM_TIMEFRAMES period = (ENUM_TIMEFRAMES)ChartPeriod(chartId);
+    int periodSeconds = PeriodSeconds(period);
+    int visibleBars = (int)ChartGetInteger(chartId, CHART_VISIBLE_BARS);
+    
+    // Pobierz czas pierwszego widocznego bara
+    datetime chartFirstTime = 0;
+    int firstVisibleBar = 0;
+    if(visibleBars > 0)
+    {
+        // Użyj iTime aby pobrać czas pierwszego widocznego bara
+        string symbol = ChartSymbol(chartId);
+        firstVisibleBar = (int)ChartGetInteger(chartId, CHART_FIRST_VISIBLE_BAR);
+        chartFirstTime = iTime(symbol, period, firstVisibleBar);
+    }
+    
+    Print("[G] 🔍 Nawigacja do czasu: ", TimeToString(targetTime));
+    Print("[G] 📊 Pierwszy widoczny bar: ", firstVisibleBar, " czas: ", TimeToString(chartFirstTime));
+    Print("[G] 📊 Timeframe: ", EnumToString(period), " (", periodSeconds, " sekund)");
+    
+    // Oblicz ile barów przesunąć
+    int barsToShift = 0;
+    if(chartFirstTime > 0)
+    {
+        barsToShift = (int)((currentTime - targetTime) / periodSeconds);
+    }
+    else
+    {
+        // Fallback - oblicz w przybliżeniu
+        barsToShift = (int)((currentTime - targetTime) / periodSeconds);
+    }
+    
+    Print("[G] 📐 Przesunięcie: ", barsToShift, " barów");
+    
+    // Metoda 1: Użyj ChartNavigate z CHART_END (najbardziej niezawodna)
+    if(ChartNavigate(chartId, CHART_END, -barsToShift))
+    {
+        Print("[G] ✅ Nawigacja ChartNavigate(CHART_END) wykonana");
+        return true;
+    }
+    
+    // Metoda 2: Użyj ChartNavigate z CHART_BEGIN
+    if(chartFirstTime > 0)
+    {
+        int barsFromBegin = (int)((targetTime - chartFirstTime) / periodSeconds);
+        if(ChartNavigate(chartId, CHART_BEGIN, barsFromBegin))
+        {
+            Print("[G] ✅ Nawigacja ChartNavigate(CHART_BEGIN) wykonana");
+            return true;
+        }
+    }
+    
+    // Metoda 3: Użyj ChartSetInteger z CHART_SHIFT
+    if(ChartSetInteger(chartId, CHART_SHIFT, barsToShift))
+    {
+        Print("[G] ✅ Nawigacja ChartSetInteger wykonana, przesunięcie: ", barsToShift, " barów");
+        return true;
+    }
+    
+    // Metoda 4: Przesunięcie względne od aktualnej pozycji
+    if(ChartNavigate(chartId, CHART_CURRENT_POS, -barsToShift))
+    {
+        Print("[G] ✅ Nawigacja ChartNavigate(CHART_CURRENT_POS) wykonana");
+        return true;
+    }
+    
+    Print("[G] ⚠️ Nie udało się automatycznie przesunąć wykresu");
+    Print("[G] 💡 Użyj scrolla myszy lub klawiatury aby przejść do czasu: ", TimeToString(targetTime));
+    Print("[G] 📝 Sugerowane przesunięcie: ", barsToShift, " barów w lewo");
+    
+    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Dodaj strzałkę do góry na dole wykresu w miejscu otwarcia pozycji    |
+//+------------------------------------------------------------------+
+void AddVerticalLineAtTime(long chartId, datetime openTime, long ticket)
+{
+    // NAJPIERW: Usuń wszystkie poprzednie strzałki edytowanych pozycji
+    ClearAllEditedPositionArrows();
+    
+    string arrowName = "EditedPosition_" + IntegerToString(ticket);
+    
+    // Pobierz zakres cen na wykresie
+    double chartHigh = ChartGetDouble(chartId, CHART_PRICE_MAX);
+    double chartLow = ChartGetDouble(chartId, CHART_PRICE_MIN);
+    
+    // Oblicz pozycję na dole wykresu (5% od dołu)
+    double arrowPrice = chartLow + (chartHigh - chartLow) * 0.05;
+    
+    // Stwórz strzałkę do góry
+    if(ObjectCreate(chartId, arrowName, OBJ_ARROW_UP, 0, openTime, arrowPrice))
+    {
+        // Ustaw właściwości strzałki
+        ObjectSetInteger(chartId, arrowName, OBJPROP_COLOR, clrHotPink);  // Różowy kolor
+        ObjectSetInteger(chartId, arrowName, OBJPROP_WIDTH, 3);           // Grubość
+        ObjectSetInteger(chartId, arrowName, OBJPROP_BACK, false);        // Na pierwszym planie
+        ObjectSetInteger(chartId, arrowName, OBJPROP_ANCHOR, ANCHOR_BOTTOM); // Kotwica na dole
+        
+        // Dodaj opis (bez dodatkowych informacji o czasie)
+        ObjectSetString(chartId, arrowName, OBJPROP_TEXT, "Pozycja " + IntegerToString(ticket));
+        
+        Print("[G] ⬆️ Dodano różową strzałkę do góry dla pozycji ", ticket);
+        
+        // Odrysuj wykres
+        ChartRedraw(chartId);
+    }
+    else
+    {
+        Print("[G] ⚠️ Nie udało się dodać strzałki: ", GetLastError());
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Usuń wszystkie strzałki edytowanych pozycji z wszystkich wykresów |
+//+------------------------------------------------------------------+
+void ClearAllEditedPositionArrows()
+{
+    // Przejdź przez wszystkie otwarte wykresy
+    long chartId = ChartFirst();
+    int totalRemoved = 0;
+    
+    while(chartId >= 0)
+    {
+        int objectsTotal = ObjectsTotal(chartId);
+        
+        // Sprawdź wszystkie obiekty na wykresie
+        for(int i = objectsTotal - 1; i >= 0; i--)
+        {
+            string objectName = ObjectName(chartId, i);
+            
+            // Sprawdź czy to nasza strzałka edytowanej pozycji
+            if(StringFind(objectName, "EditedPosition_") == 0)
+            {
+                ObjectDelete(chartId, objectName);
+                totalRemoved++;
+            }
+        }
+        
+        // Odrysuj wykres jeśli coś usunięto
+        if(totalRemoved > 0)
+        {
+            ChartRedraw(chartId);
+        }
+        
+        chartId = ChartNext(chartId);
+    }
+    
+    if(totalRemoved > 0)
+    {
+        Print("[G] 🗑️ Usunięto ", totalRemoved, " poprzednich strzałek edytowanych pozycji");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Usuń wszystkie linie edytowanych pozycji (zachowana dla kompatybilności) |
+//+------------------------------------------------------------------+
+void ClearEditedPositionLines(long chartId)
+{
+    // Ta funkcja jest już nieaktualna - używamy ClearAllEditedPositionArrows()
+    // Zachowana dla kompatybilności z istniejącym kodem
+    
+    int objectsTotal = ObjectsTotal(chartId);
+    
+    for(int i = objectsTotal - 1; i >= 0; i--)
+    {
+        string objectName = ObjectName(chartId, i);
+        
+        // Usuń obiekty zaczynające się od "EditedPosition_"
+        if(StringFind(objectName, "EditedPosition_") == 0)
+        {
+            ObjectDelete(chartId, objectName);
+            Print("[G] 🗑️ Usunięto linię: ", objectName);
+        }
     }
 }
