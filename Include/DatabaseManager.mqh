@@ -879,6 +879,60 @@ void DatabaseManager_PrintStats()
         }
         DatabaseFinalize(slDataReq);
     }
+    
+    // DEBUGOWANIE: Sprawdź czy tabela position_opening_sl istnieje
+    DatabaseManager_CheckTableExists();
+}
+
+//+------------------------------------------------------------------+
+//| FUNKCJA DEBUGOWANIA: Sprawdza czy tabela istnieje               |
+//+------------------------------------------------------------------+
+void DatabaseManager_CheckTableExists()
+{
+    if(!g_databaseReady || g_db_handle == INVALID_HANDLE)
+    {
+        DatabaseManager_PrintDebug("❌ Baza danych nie jest gotowa");
+        return;
+    }
+    
+    // Sprawdź czy tabela position_opening_sl istnieje
+    int request = DatabasePrepare(g_db_handle, "SELECT name FROM sqlite_master WHERE type='table' AND name='position_opening_sl'");
+    if(request != INVALID_HANDLE)
+    {
+        if(DatabaseRead(request))
+        {
+            string tableName;
+            if(DatabaseColumnText(request, 0, tableName))
+            {
+                DatabaseManager_PrintDebug("✅ Tabela position_opening_sl ISTNIEJE");
+            }
+        }
+        else
+        {
+            DatabaseManager_PrintDebug("❌ Tabela position_opening_sl NIE ISTNIEJE!");
+            DatabaseManager_PrintDebug("💡 Sprawdź logi inicjalizacji lub zrestartuj EA");
+        }
+        DatabaseFinalize(request);
+    }
+    
+    // Sprawdź strukturę tabeli
+    int structRequest = DatabasePrepare(g_db_handle, "PRAGMA table_info(position_opening_sl)");
+    if(structRequest != INVALID_HANDLE)
+    {
+        DatabaseManager_PrintDebug("📋 Struktura tabeli position_opening_sl:");
+        while(DatabaseRead(structRequest))
+        {
+            long cid;
+            string name, type;
+            
+            DatabaseColumnLong(structRequest, 0, cid);
+            DatabaseColumnText(structRequest, 1, name);
+            DatabaseColumnText(structRequest, 2, type);
+            
+            DatabaseManager_PrintDebug("  Kolumna: " + name + " (" + type + ")");
+        }
+        DatabaseFinalize(structRequest);
+    }
 }
 
 #endif // DATABASEMANAGER_MQH

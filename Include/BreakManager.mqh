@@ -80,8 +80,17 @@ void BreakManager_CheckDailyLimits()
         g_break_reason = "dzienny limit strat";
         g_break_alert_shown = false;
         
+        // Dźwięk ostrzegawczy
+        PlaySound("stops.wav");
+        
+        // Wyświetlenie na wykresie (nieblokujące)
+        string alertText = "\n\n=== DZIENNY LIMIT STRAT ===\n";
+        alertText += "Całkowity profit: " + DoubleToString(totalDailyProfit, 2) + "\n";
+        alertText += "Trading zablokowany do: " + TimeToString(g_przerwa_do) + "\n";
+        alertText += "===========================";
+        Comment(alertText);
+        
         Print("UWAGA: Osiągnięto dzienny limit strat!");
-        MessageBox("UWAGA: Osiągnięto dzienny limit strat!");
         Print("Całkowity profit: ", DoubleToString(totalDailyProfit, 2));
         Print("Trading zablokowany do: ", TimeToString(g_przerwa_do));
     }
@@ -274,8 +283,21 @@ void BreakManager_HandleClosedPosition()
     // Dodatkowe informacje o możliwości wykonania trade
     if(teraz < g_przerwa_do)
     {
-        MessageBox("UWAGA: Handel zablokowany do: " + TimeToString(g_przerwa_do));
-        Print("UWAGA: Handel zablokowany do: " + TimeToString((g_przerwa_do-3600)));
+        // Dźwięk ostrzegawczy
+        PlaySound("stops.wav");
+        
+        // Wyświetlenie na wykresie (nieblokujące)
+        string alertText = "\n\n=== HANDEL ZABLOKOWANY ===\n";
+        alertText += "Handel zablokowany do: " + TimeToString(g_przerwa_do) + "\n";
+        alertText += "Powód: " + g_break_reason + "\n";
+        
+        datetime pozostalo = g_przerwa_do - teraz;
+        int minut = (int)(pozostalo / 60);
+        alertText += "Pozostało: " + IntegerToString(minut) + " minut\n";
+        alertText += "=========================";
+        Comment(alertText);
+        
+        Print("UWAGA: Handel zablokowany do: " + TimeToString(g_przerwa_do));
     }
     else 
     {
