@@ -9,6 +9,18 @@
 #property version   "1.00"
 #property strict
 
+// Zmienne globalne dla systemu śledzenia pozycji
+bool g_trackingActive = false;         // Czy śledzenie jest aktywne
+datetime g_lastTrackingUpdate = 0;     // Ostatnia aktualizacja śledzenia
+long g_currentTrackedTicket = 0;       // Aktualnie śledzone zlecenie
+string g_trackingStatus = "";           // Status do wyświetlenia
+int g_trackingCounter = 0;             // Licznik wykonanych sprawdzeń
+const int MAX_TRACKING_CYCLES = 300;   // Maksymalna liczba cykli (5 minut)
+
+// Zmienne globalne dla innych timerów
+datetime g_lastPositionCheck = 0;      // Ostatnie sprawdzenie pozycji
+datetime g_lastBreakCheck = 0;         // Ostatnie sprawdzenie przerw
+
 // Include bibliotek systemowych
 #include <Trade\Trade.mqh>
 
@@ -48,7 +60,11 @@ int OnInit()
     PositionManager_Init();
     
     // Ustawienie timera
-    EventSetTimer(Config_GetTimerInterval());
+    int timerIntervalValue = Config_GetTimerInterval();
+    EventSetTimer(timerIntervalValue);
+    
+    // Stwórz przycisk śledzenia pozycji
+    CreateTrackingButton();
     
     Print("=== EA Nie_odjeb zainicjalizowany pomyślnie ===");
     return(INIT_SUCCEEDED);
@@ -61,6 +77,17 @@ void OnDeinit(const int reason)
 {
     Print("=== Deinicjalizacja EA Nie_odjeb ===");
     
+    // Wyłącz śledzenie pozycji
+    if(g_trackingActive)
+    {
+        g_trackingActive = false;
+        ClearAllEditedPositionArrows();
+        ClearTrackingStatusFromAllCharts();
+    }
+    
+    // Usuń przycisk śledzenia
+    RemoveTrackingButton();
+    
     EventKillTimer();
     DatabaseManager_Deinit();
     
@@ -68,17 +95,33 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| Timer function                                                   |
+//| Timer function - teraz z różnymi interwałami                     |
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-    // Sprawdzenie pozycji pod kątem maksymalnej straty
-    PositionManager_CheckAllPositionsForMaxLoss();
+    datetime currentTime = TimeCurrent();
     
-    // Monitoring przerwy (działa tylko podczas przerwy)
-    BreakManager_MonitorAndBlockTrades();
+    // NAJWYŻSZY PRIORYTET: Śledzenie edytowanej pozycji (co sekundę, jeśli aktywne)
+    if(g_trackingActive)
+    {
+        ProcessPositionTracking();
+    }
     
-    // Usunięto: CheckAndRemoveExpiredDots() - już nie potrzebne
+    // Sprawdzenie pozycji pod kątem maksymalnej straty (co 30 sekund)
+    if(currentTime - g_lastPositionCheck >= 30)
+    {
+        Print("[TIMER-30s] 📊 Sprawdzenie pozycji pod kątem maksymalnej straty (", TimeToString(currentTime, TIME_SECONDS), ")");
+        PositionManager_CheckAllPositionsForMaxLoss();
+        g_lastPositionCheck = currentTime;
+    }
+    
+    // Monitoring przerwy (co 30 sekund, działa tylko podczas przerwy)
+    if(currentTime - g_lastBreakCheck >= 30)
+    {
+        Print("[TIMER-30s] ⏳ Monitoring przerwy i blokowanie trejdów (", TimeToString(currentTime, TIME_SECONDS), ")");
+        BreakManager_MonitorAndBlockTrades();
+        g_lastBreakCheck = currentTime;
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -88,6 +131,16 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 {
     switch(id)
     {
+        case CHARTEVENT_OBJECT_CLICK:
+        {
+            if(sparam == "TrackingButton")
+            {
+                TogglePositionTracking();
+                return;
+            }
+            break;
+        }
+        
         case CHARTEVENT_KEYDOWN:
         {
             switch((int)lparam)
@@ -109,9 +162,9 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
                     DatabaseManager_PrintStats();
                     break;
                 }
-                case 71:   // klawisz g - pokaż edytowaną pozycję na wykresie (G jak goto)
+                case 71:   // klawisz g - toggle śledzenia edytowanej pozycji (G jak goto)
                 {
-                    ShowEditedPositionOnChart();
+                    TogglePositionTracking();
                     break;
                 }
             }
@@ -387,17 +440,25 @@ long ReadCurrentEditTicketFromDatabase()
                 ticket = StringToInteger(ticket_str);
             }
             
-            Print("[G] 📆 Odczytano z bazy: ticket = ", ticket, " (string: '", ticket_str, "')");
+            // DEBUG: Pokaż tylko jeśli śledzenie jest aktywne lub przy włączaniu
+            if(g_trackingActive || ticket > 0)
+            {
+                Print("[G] 📆 Odczytano z bazy: ticket = ", ticket, " (string: '", ticket_str, "')");
+            }
         }
         else
         {
-            Print("[G] ⚠️ Nie można odczytać wartości ticket z bazy");
+            if(g_trackingActive)
+                Print("[G] ⚠️ Nie można odczytać wartości ticket z bazy");
         }
     }
     else
     {
-        Print("[G] ⚠️ Brak danych komunikacji w bazie lub tabela nie istnieje");
-        Print("[G] 📝 Upewnij się, że dziennik Python był uruchomiony (tworzy tabelę)");
+        if(g_trackingActive)
+        {
+            Print("[G] ⚠️ Brak danych komunikacji w bazie lub tabela nie istnieje");
+            Print("[G] 📝 Upewnij się, że dziennik Python był uruchomiony (tworzy tabelę)");
+        }
     }
     
     // Aktualizuj heartbeat MQL5
@@ -514,35 +575,100 @@ bool NavigateChartToTime(long chartId, datetime targetTime)
 }
 
 //+------------------------------------------------------------------+
-//| Dodaj strzałkę do góry na dole wykresu w miejscu otwarcia pozycji    |
+//| Dodaj strzałkę w zależności od typu pozycji                      |
 //+------------------------------------------------------------------+
 void AddVerticalLineAtTime(long chartId, datetime openTime, long ticket)
 {
-    // NAJPIERW: Usuń wszystkie poprzednie strzałki edytowanych pozycji
-    ClearAllEditedPositionArrows();
+    // NIE usuwamy strzałek tutaj - robi to już system śledzenia
     
     string arrowName = "EditedPosition_" + IntegerToString(ticket);
+    
+    // Pobierz dane pozycji do określenia typu
+    bool isBuyPosition = false;
+    bool positionFound = false;
+    
+    // Sprawdź czy to otwarta pozycja
+    if(PositionSelectByTicket(ticket))
+    {
+        ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        isBuyPosition = (type == POSITION_TYPE_BUY);
+        positionFound = true;
+    }
+    else if(HistorySelectByPosition(ticket))
+    {
+        // Pozycja zamknięta - sprawdź historię
+        int dealsTotal = HistoryDealsTotal();
+        for(int i = 0; i < dealsTotal; i++)
+        {
+            ulong deal_ticket = HistoryDealGetTicket(i);
+            if(deal_ticket > 0)
+            {
+                long dealEntry = HistoryDealGetInteger(deal_ticket, DEAL_ENTRY);
+                if(dealEntry == DEAL_ENTRY_IN)
+                {
+                    ENUM_DEAL_TYPE deal_type = (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal_ticket, DEAL_TYPE);
+                    isBuyPosition = (deal_type == DEAL_TYPE_BUY);
+                    positionFound = true;
+                    break;
+                }
+            }
+        }
+    }
+    
+    if(!positionFound)
+    {
+        Print("[G] ⚠️ Nie udało się określić typu pozycji dla ticket ", ticket);
+        return;
+    }
     
     // Pobierz zakres cen na wykresie
     double chartHigh = ChartGetDouble(chartId, CHART_PRICE_MAX);
     double chartLow = ChartGetDouble(chartId, CHART_PRICE_MIN);
     
-    // Oblicz pozycję na dole wykresu (5% od dołu)
-    double arrowPrice = chartLow + (chartHigh - chartLow) * 0.05;
+    // Pobierz cenę świeczki w czasie otwarcia pozycji
+    string symbol = ChartSymbol(chartId);
+    ENUM_TIMEFRAMES period = (ENUM_TIMEFRAMES)ChartPeriod(chartId);
     
-    // Stwórz strzałkę do góry
-    if(ObjectCreate(chartId, arrowName, OBJ_ARROW_UP, 0, openTime, arrowPrice))
+    // Znajdź świeczkę najbliższą czasowi otwarcia
+    int candleIndex = iBarShift(symbol, period, openTime, true);
+    double candleHigh = iHigh(symbol, period, candleIndex);
+    double candleLow = iLow(symbol, period, candleIndex);
+    
+    // Ustaw pozycję i typ strzałki w zależności od typu pozycji
+    double arrowPrice;
+    ENUM_OBJECT arrowType;
+    string positionTypeText;
+    
+    if(isBuyPosition)
+    {
+        // BUY: Strzałka do góry, pod świeczką
+        arrowType = OBJ_ARROW_UP;
+        double margin = (chartHigh - chartLow) * 0.02; // 2% marginesu
+        arrowPrice = candleLow - margin;
+        positionTypeText = "BUY";
+    }
+    else
+    {
+        // SELL: Strzałka w dół, nad świeczką
+        arrowType = OBJ_ARROW_DOWN;
+        double margin = (chartHigh - chartLow) * 0.02; // 2% marginesu
+        arrowPrice = candleHigh + margin;
+        positionTypeText = "SELL";
+    }
+    
+    // Stwórz strzałkę
+    if(ObjectCreate(chartId, arrowName, arrowType, 0, openTime, arrowPrice))
     {
         // Ustaw właściwości strzałki
         ObjectSetInteger(chartId, arrowName, OBJPROP_COLOR, clrHotPink);  // Różowy kolor
-        ObjectSetInteger(chartId, arrowName, OBJPROP_WIDTH, 3);           // Grubość
+        ObjectSetInteger(chartId, arrowName, OBJPROP_WIDTH, 4);           // Większa grubość
         ObjectSetInteger(chartId, arrowName, OBJPROP_BACK, false);        // Na pierwszym planie
-        ObjectSetInteger(chartId, arrowName, OBJPROP_ANCHOR, ANCHOR_BOTTOM); // Kotwica na dole
         
-        // Dodaj opis (bez dodatkowych informacji o czasie)
-        ObjectSetString(chartId, arrowName, OBJPROP_TEXT, "Pozycja " + IntegerToString(ticket));
+        // Dodaj opis
+        string description = StringFormat("%s %d", positionTypeText, ticket);
+        ObjectSetString(chartId, arrowName, OBJPROP_TEXT, description);
         
-        Print("[G] ⬆️ Dodano różową strzałkę do góry dla pozycji ", ticket);
+        Print("[G] ", (isBuyPosition ? "⬆️" : "⬇️"), " Dodano strzałkę ", positionTypeText, " dla pozycji ", ticket);
         
         // Odrysuj wykres
         ChartRedraw(chartId);
@@ -595,6 +721,198 @@ void ClearAllEditedPositionArrows()
 }
 
 //+------------------------------------------------------------------+
+//| Toggle (włącz/wyłącz) śledzenie pozycji                          |
+//+------------------------------------------------------------------+
+void TogglePositionTracking()
+{
+    if(g_trackingActive)
+    {
+        // Wyłącz śledzenie
+        g_trackingActive = false;
+        g_currentTrackedTicket = 0;
+        g_trackingStatus = "";
+        g_trackingCounter = 0; // Resetuj licznik
+        
+        // Usuń wszystkie strzałki śledzenia
+        ClearAllEditedPositionArrows();
+        
+        // Usuń status z wykresów
+        ClearTrackingStatusFromAllCharts();
+        
+        // Zaktualizuj przycisk na czerwony
+        UpdateTrackingButton();
+        
+        Print("[G] ❌ Śledzenie pozycji WYŁĄCZONE");
+    }
+    else
+    {
+        // Włącz śledzenie
+        g_trackingActive = true;
+        g_lastTrackingUpdate = 0; // Wymusz natychmiastową aktualizację
+        g_currentTrackedTicket = 0; // Resetuj ticket żeby wymusić pełną aktualizację
+        g_trackingCounter = 0; // Resetuj licznik
+        
+        // Zaktualizuj przycisk na zielony
+        UpdateTrackingButton();
+        
+        Print("[G] ✅ Śledzenie pozycji WŁĄCZONE - maks. ", MAX_TRACKING_CYCLES, " cykli (5 minut)");
+        
+        // NATYCHMIASTOWA PEŁNA AKTUALIZACJA
+        long currentTicket = ReadCurrentEditTicketFromDatabase();
+        
+        if(currentTicket > 0)
+        {
+            Print("[G] 🔄 Rozpoczynam śledzenie pozycji: ", currentTicket);
+            g_currentTrackedTicket = currentTicket;
+            
+            // Pokaż pozycję natychmiast
+            ShowEditedPositionOnChart();
+            
+            // Ustaw status
+            g_trackingStatus = StringFormat("Śledzenie aktywne | Pozycja: %d | Cykl: %d/%d | %s", 
+                                           currentTicket, g_trackingCounter, MAX_TRACKING_CYCLES, TimeToString(TimeCurrent(), TIME_SECONDS));
+            UpdateTrackingStatusOnAllCharts();
+        }
+        else
+        {
+            Print("[G] ⚠️ Brak pozycji do śledzenia w bazie danych");
+            g_trackingStatus = StringFormat("Brak edytowanej pozycji | Cykl: %d/%d", g_trackingCounter, MAX_TRACKING_CYCLES);
+            UpdateTrackingStatusOnAllCharts();
+        }
+        
+        // Zaktualizuj czas ostatniej aktualizacji
+        g_lastTrackingUpdate = TimeCurrent();
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Przetwarzaj śledzenie pozycji (wywoływane co sekundę)              |
+//+------------------------------------------------------------------+
+void ProcessPositionTracking()
+{
+    datetime currentTime = TimeCurrent();
+    
+    // Sprawdź czy minęła JEDNA SEKUNDA od ostatniej aktualizacji (nie minuta!)
+    if(currentTime - g_lastTrackingUpdate < 1)
+    {
+        return; // Za szybko, poczekaj
+    }
+    
+    g_lastTrackingUpdate = currentTime;
+    g_trackingCounter++; // Zwiększ licznik
+    
+    // Sprawdź limit cykli (300 = 5 minut)
+    if(g_trackingCounter >= MAX_TRACKING_CYCLES)
+    {
+        Print("[G] ⏰ Osiągnięto limit 300 cykli (5 minut) - automatyczne wyłączenie");
+        g_trackingActive = false;
+        g_trackingCounter = 0;
+        ClearAllEditedPositionArrows();
+        ClearTrackingStatusFromAllCharts();
+        UpdateTrackingButton(); // Zaktualizuj przycisk na czerwony
+        return;
+    }
+    
+    // DEBUG: Pokaż że funkcja działa (co 10 sekund)
+    if(g_trackingCounter % 10 == 1)
+    {
+        Print("[G] 🔄 Śledzenie działa... (cykl #", g_trackingCounter, "/", MAX_TRACKING_CYCLES, ")");
+    }
+    
+    // Odczytaj aktualny ticket z bazy
+    long currentTicket = ReadCurrentEditTicketFromDatabase();
+    
+    if(currentTicket <= 0)
+    {
+        // Brak edytowanej pozycji
+        if(g_currentTrackedTicket != 0)
+        {
+            // Poprzednio była pozycja, teraz jej nie ma
+            ClearAllEditedPositionArrows();
+            g_currentTrackedTicket = 0;
+            g_trackingStatus = "Brak edytowanej pozycji";
+            UpdateTrackingStatusOnAllCharts();
+            Print("[G] 📍 Śledzenie: Brak edytowanej pozycji");
+        }
+        else
+        {
+            // Aktualizuj status z czasem i licznikiem
+            g_trackingStatus = StringFormat("Brak edytowanej pozycji | Cykl: %d/%d | %s", 
+                                           g_trackingCounter, MAX_TRACKING_CYCLES, TimeToString(currentTime, TIME_SECONDS));
+            UpdateTrackingStatusOnAllCharts();
+        }
+        return;
+    }
+    
+    // Sprawdź czy pozycja się zmieniła
+    if(currentTicket != g_currentTrackedTicket)
+    {
+        g_currentTrackedTicket = currentTicket;
+        Print("[G] 🔄 Śledzenie: Nowa pozycja ", currentTicket);
+        
+        // Usuń stare strzałki
+        ClearAllEditedPositionArrows();
+        
+        // Pokaż nową pozycję
+        ShowEditedPositionOnChart();
+    }
+    
+    // Zawsze aktualizuj status na wykresach (z aktualnym czasem i licznikiem)
+    g_trackingStatus = StringFormat("Śledzenie aktywne | Pozycja: %d | Cykl: %d/%d | %s", 
+                                   currentTicket, g_trackingCounter, MAX_TRACKING_CYCLES, TimeToString(currentTime, TIME_SECONDS));
+    UpdateTrackingStatusOnAllCharts();
+}
+
+//+------------------------------------------------------------------+
+//| Aktualizuj status śledzenia na wszystkich wykresach               |
+//+------------------------------------------------------------------+
+void UpdateTrackingStatusOnAllCharts()
+{
+    long chartId = ChartFirst();
+    
+    while(chartId >= 0)
+    {
+        // Dodaj/aktualizuj status w lewym górnym rogu
+        string statusName = "TrackingStatus";
+        
+        // Usuń stary status
+        ObjectDelete(chartId, statusName);
+        
+        if(g_trackingStatus != "")
+        {
+            // Dodaj nowy status
+            if(ObjectCreate(chartId, statusName, OBJ_LABEL, 0, 0, 0))
+            {
+                ObjectSetInteger(chartId, statusName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+                ObjectSetInteger(chartId, statusName, OBJPROP_XDISTANCE, 10);
+                ObjectSetInteger(chartId, statusName, OBJPROP_YDISTANCE, 30);
+                ObjectSetInteger(chartId, statusName, OBJPROP_COLOR, clrLimeGreen);
+                ObjectSetInteger(chartId, statusName, OBJPROP_FONTSIZE, 9);
+                ObjectSetString(chartId, statusName, OBJPROP_TEXT, g_trackingStatus);
+                ObjectSetString(chartId, statusName, OBJPROP_FONT, "Arial");
+            }
+        }
+        
+        chartId = ChartNext(chartId);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Usuń status śledzenia ze wszystkich wykresów                     |
+//+------------------------------------------------------------------+
+void ClearTrackingStatusFromAllCharts()
+{
+    long chartId = ChartFirst();
+    
+    while(chartId >= 0)
+    {
+        ObjectDelete(chartId, "TrackingStatus");
+        ChartRedraw(chartId);
+        chartId = ChartNext(chartId);
+    }
+}
+
+//+------------------------------------------------------------------+
 //| Usuń wszystkie linie edytowanych pozycji (zachowana dla kompatybilności) |
 //+------------------------------------------------------------------+
 void ClearEditedPositionLines(long chartId)
@@ -614,5 +932,89 @@ void ClearEditedPositionLines(long chartId)
             ObjectDelete(chartId, objectName);
             Print("[G] 🗑️ Usunięto linię: ", objectName);
         }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Stwórz przycisk śledzenia pozycji                                 |
+//+------------------------------------------------------------------+
+void CreateTrackingButton()
+{
+    long chartId = ChartID();
+    string buttonName = "TrackingButton";
+    
+    // Usuń istniejący przycisk jeśli jest
+    ObjectDelete(chartId, buttonName);
+    
+    // Stwórz przycisk
+    if(ObjectCreate(chartId, buttonName, OBJ_BUTTON, 0, 0, 0))
+    {
+        // Właściwości przycisku
+        ObjectSetInteger(chartId, buttonName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+        ObjectSetInteger(chartId, buttonName, OBJPROP_XDISTANCE, 10);
+        ObjectSetInteger(chartId, buttonName, OBJPROP_YDISTANCE, 60);
+        ObjectSetInteger(chartId, buttonName, OBJPROP_XSIZE, 120);
+        ObjectSetInteger(chartId, buttonName, OBJPROP_YSIZE, 25);
+        ObjectSetString(chartId, buttonName, OBJPROP_TEXT, "TRACK: OFF");
+        ObjectSetString(chartId, buttonName, OBJPROP_FONT, "Arial Bold");
+        ObjectSetInteger(chartId, buttonName, OBJPROP_FONTSIZE, 9);
+        ObjectSetInteger(chartId, buttonName, OBJPROP_COLOR, clrWhite);
+        ObjectSetInteger(chartId, buttonName, OBJPROP_BGCOLOR, clrCrimson); // Czerwony gdy wyłączony
+        ObjectSetInteger(chartId, buttonName, OBJPROP_BORDER_COLOR, clrBlack);
+        ObjectSetInteger(chartId, buttonName, OBJPROP_BACK, false);
+        ObjectSetInteger(chartId, buttonName, OBJPROP_STATE, false);
+        ObjectSetInteger(chartId, buttonName, OBJPROP_SELECTABLE, true);
+        ObjectSetInteger(chartId, buttonName, OBJPROP_SELECTED, false);
+        
+        Print("[INIT] ⚙️ Przycisk śledzenia pozycji utworzony");
+    }
+    else
+    {
+        Print("[ERROR] Nie udało się utworzyć przycisku: ", GetLastError());
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Zaktualizuj wygląd przycisku                                     |
+//+------------------------------------------------------------------+
+void UpdateTrackingButton()
+{
+    long chartId = ChartID();
+    string buttonName = "TrackingButton";
+    
+    if(ObjectFind(chartId, buttonName) >= 0)
+    {
+        if(g_trackingActive)
+        {
+            // Włączony - zielony przycisk
+            ObjectSetString(chartId, buttonName, OBJPROP_TEXT, "TRACK: ON");
+            ObjectSetInteger(chartId, buttonName, OBJPROP_BGCOLOR, clrForestGreen);
+            ObjectSetInteger(chartId, buttonName, OBJPROP_COLOR, clrWhite);
+        }
+        else
+        {
+            // Wyłączony - czerwony przycisk
+            ObjectSetString(chartId, buttonName, OBJPROP_TEXT, "TRACK: OFF");
+            ObjectSetInteger(chartId, buttonName, OBJPROP_BGCOLOR, clrCrimson);
+            ObjectSetInteger(chartId, buttonName, OBJPROP_COLOR, clrWhite);
+        }
+        
+        ChartRedraw(chartId);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Usuń przycisk śledzenia pozycji                                  |
+//+------------------------------------------------------------------+
+void RemoveTrackingButton()
+{
+    long chartId = ChartID();
+    string buttonName = "TrackingButton";
+    
+    if(ObjectFind(chartId, buttonName) >= 0)
+    {
+        ObjectDelete(chartId, buttonName);
+        ChartRedraw(chartId);
+        Print("[DEINIT] 🗑️ Przycisk śledzenia pozycji usunięty");
     }
 }

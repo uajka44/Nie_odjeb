@@ -11,7 +11,7 @@
 // Parametry wejściowe EA
 input double MaxDailyLoss = 55.0;        // Maksymalna dzienna strata
 input int max_sl_unknown = 15;           // Domyślny SL dla nieznanych instrumentów
-input int timerInterval = 30;            // Co ile sekund wywołuje OnTimer
+int timerInterval = 1;                   // Co ile sekund wywołuje OnTimer (dla śledzenia pozycji) - stała wartość
 input int przerwa_2stratne = 3;          // Przerwa w minutach po 2 stratnych z rzędu
 input int przerwa_3stratne = 6;          // Przerwa w minutach po 3 stratnych z rzędu
 input double default_vol_dax = 1;        // Domyślny wolumen dla DAX

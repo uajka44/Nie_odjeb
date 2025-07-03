@@ -85,6 +85,9 @@ void PositionManager_CheckAllPositions()
 //+------------------------------------------------------------------+
 void PositionManager_CheckAllPositionsForMaxLoss()
 {
+    int totalPositions = PositionsTotal();
+    Print("[POS-CHECK] Sprawdzam ", totalPositions, " otwartych pozycji pod kątem maksymalnej straty");
+    
     for(int i = PositionsTotal() - 1; i >= 0; i--)
     {
         ulong ticket = PositionGetTicket(i);
@@ -94,7 +97,7 @@ void PositionManager_CheckAllPositionsForMaxLoss()
         {   
             string position_symbol = PositionGetString(POSITION_SYMBOL);
             double current_market_price_ask = NormalizeDouble(SymbolInfoDouble(position_symbol, SYMBOL_ASK), _Digits);
-            Print("Profit: " + DoubleToString(PositionGetDouble(POSITION_PROFIT), 2));
+            Print("[POS-CHECK] Pozycja ", ticket, " (", position_symbol, ") - Profit: ", DoubleToString(PositionGetDouble(POSITION_PROFIT), 2));
 
             if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) // buy
             {

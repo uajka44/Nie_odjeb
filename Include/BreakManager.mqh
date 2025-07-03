@@ -351,6 +351,8 @@ void BreakManager_ShowBreakAlert(string action)
 //+------------------------------------------------------------------+
 void BreakManager_MonitorAndBlockTrades()
 {
+    Print("[BREAK-CHECK] Monitoring przerwy - sprawdzam czy można trgovać (g_mozna_wykonac_trade=", g_mozna_wykonac_trade, ")");
+    
     // Monitoring działa tylko podczas przerwy
     if(g_mozna_wykonac_trade) 
     {
