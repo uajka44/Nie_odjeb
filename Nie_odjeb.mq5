@@ -489,7 +489,7 @@ void UpdateMQL5Heartbeat(int db_handle)
 }
 
 //+------------------------------------------------------------------+
-//| Nawiguj wykres do określonego czasu                               |
+//| Nawiguj wykres do określonego czasu - POPRAWIONA WERSJA           |
 //+------------------------------------------------------------------+
 bool NavigateChartToTime(long chartId, datetime targetTime)
 {
@@ -502,74 +502,126 @@ bool NavigateChartToTime(long chartId, datetime targetTime)
     }
     
     // Pobierz informacje o wykresie
+    string symbol = ChartSymbol(chartId);
     ENUM_TIMEFRAMES period = (ENUM_TIMEFRAMES)ChartPeriod(chartId);
-    int periodSeconds = PeriodSeconds(period);
-    int visibleBars = (int)ChartGetInteger(chartId, CHART_VISIBLE_BARS);
-    
-    // Pobierz czas pierwszego widocznego bara
-    datetime chartFirstTime = 0;
-    int firstVisibleBar = 0;
-    if(visibleBars > 0)
-    {
-        // Użyj iTime aby pobrać czas pierwszego widocznego bara
-        string symbol = ChartSymbol(chartId);
-        firstVisibleBar = (int)ChartGetInteger(chartId, CHART_FIRST_VISIBLE_BAR);
-        chartFirstTime = iTime(symbol, period, firstVisibleBar);
-    }
     
     Print("[G] 🔍 Nawigacja do czasu: ", TimeToString(targetTime));
-    Print("[G] 📊 Pierwszy widoczny bar: ", firstVisibleBar, " czas: ", TimeToString(chartFirstTime));
-    Print("[G] 📊 Timeframe: ", EnumToString(period), " (", periodSeconds, " sekund)");
+    Print("[G] 📊 Symbol: ", symbol, ", Timeframe: ", EnumToString(period));
     
-    // Oblicz ile barów przesunąć
-    int barsToShift = 0;
-    if(chartFirstTime > 0)
+    // NOWA METODA: Użyj iBarShift do znalezienia dokładnego indeksu bara
+    int targetBarIndex = iBarShift(symbol, period, targetTime, true);
+    
+    if(targetBarIndex < 0)
     {
-        barsToShift = (int)((currentTime - targetTime) / periodSeconds);
-    }
-    else
-    {
-        // Fallback - oblicz w przybliżeniu
-        barsToShift = (int)((currentTime - targetTime) / periodSeconds);
+        Print("[G] ❌ Nie można znaleźć bara dla czasu: ", TimeToString(targetTime));
+        Print("[G] 💡 Możliwe przyczyny: czas sprzed dostępnej historii lub błędny symbol");
+        return false;
     }
     
-    Print("[G] 📐 Przesunięcie: ", barsToShift, " barów");
+    Print("[G] 📐 Znaleziony bar na indeksie: ", targetBarIndex);
     
-    // Metoda 1: Użyj ChartNavigate z CHART_END (najbardziej niezawodna)
-    if(ChartNavigate(chartId, CHART_END, -barsToShift))
+    // Sprawdź rzeczywisty czas znalezionego bara (dla weryfikacji)
+    datetime foundBarTime = iTime(symbol, period, targetBarIndex);
+    if(foundBarTime > 0)
     {
-        Print("[G] ✅ Nawigacja ChartNavigate(CHART_END) wykonana");
+        Print("[G] 🕐 Rzeczywisty czas bara: ", TimeToString(foundBarTime));
+        
+        // Pokaż różnicę czasową jeśli istnieje
+        int timeDiff = (int)(targetTime - foundBarTime);
+        if(timeDiff != 0)
+        {
+            Print("[G] ⏰ Różnica czasowa: ", timeDiff, " sekund (normalne dla timeframe > M1)");
+        }
+    }
+    
+    // Wyłącz autoscroll przed nawigacją (ważne!)
+    bool autoScrollWasOn = (bool)ChartGetInteger(chartId, CHART_AUTOSCROLL);
+    if(autoScrollWasOn)
+    {
+        ChartSetInteger(chartId, CHART_AUTOSCROLL, false);
+        Print("[G] 🔧 Wyłączono autoscroll");
+    }
+    
+    // GŁÓWNA NAWIGACJA: Przesuń wykres do znalezionego bara
+    // Używamy CHART_END z ujemnym przesunięciem (najbardziej niezawodne)
+    bool success = ChartNavigate(chartId, CHART_END, -targetBarIndex); // dodalem 5 barow by strzalka nie byla rysowana na samym boku wykresu
+    
+    if(success)
+    {
+        Print("[G] ✅ Wykres przesunięty do bara ", targetBarIndex, " (metoda CHART_END)");
+        
+        // Sprawdź rezultat nawigacji
+        int newFirstVisibleBar = (int)ChartGetInteger(chartId, CHART_FIRST_VISIBLE_BAR);
+        Print("[G] 📍 Pierwszy widoczny bar po nawigacji: ", newFirstVisibleBar);
+        
+        // Opcjonalnie: przywróć autoscroll jeśli był włączony
+        if(autoScrollWasOn)
+        {
+            // Czekaj chwilę przed przywróceniem autoscroll
+            Sleep(100);
+            ChartSetInteger(chartId, CHART_AUTOSCROLL, true);
+            Print("[G] 🔧 Przywrócono autoscroll");
+        }
+        
         return true;
     }
     
-    // Metoda 2: Użyj ChartNavigate z CHART_BEGIN
-    if(chartFirstTime > 0)
+    // METODA ZAPASOWA 1: Spróbuj z CHART_BEGIN
+    Print("[G] 🔄 Metoda CHART_END nie zadziałała, próbuję CHART_BEGIN...");
+    
+    // Oblicz pozycję od początku historii
+    int totalBars = iBars(symbol, period);
+    if(totalBars > 0)
     {
-        int barsFromBegin = (int)((targetTime - chartFirstTime) / periodSeconds);
-        if(ChartNavigate(chartId, CHART_BEGIN, barsFromBegin))
+        int barsFromBegin = totalBars - targetBarIndex - 1 ; // +5 barów marginesu
+        success = ChartNavigate(chartId, CHART_BEGIN, barsFromBegin);
+        
+        if(success)
         {
-            Print("[G] ✅ Nawigacja ChartNavigate(CHART_BEGIN) wykonana");
+            Print("[G] ✅ Wykres przesunięty (metoda CHART_BEGIN), bars from begin: ", barsFromBegin);
+            
+            if(autoScrollWasOn)
+            {
+                Sleep(100);
+                ChartSetInteger(chartId, CHART_AUTOSCROLL, true);
+            }
+            
             return true;
         }
     }
     
-    // Metoda 3: Użyj ChartSetInteger z CHART_SHIFT
-    if(ChartSetInteger(chartId, CHART_SHIFT, barsToShift))
+    // METODA ZAPASOWA 2: Spróbuj z CHART_CURRENT_POS
+    Print("[G] 🔄 Próbuję CHART_CURRENT_POS...");
+    
+    int currentFirstBar = (int)ChartGetInteger(chartId, CHART_FIRST_VISIBLE_BAR);
+    int shiftFromCurrent = currentFirstBar - targetBarIndex;
+    
+    success = ChartNavigate(chartId, CHART_CURRENT_POS, shiftFromCurrent);
+    
+    if(success)
     {
-        Print("[G] ✅ Nawigacja ChartSetInteger wykonana, przesunięcie: ", barsToShift, " barów");
+        Print("[G] ✅ Wykres przesunięty (metoda CHART_CURRENT_POS), shift: ", shiftFromCurrent);
+        
+        if(autoScrollWasOn)
+        {
+            Sleep(100);
+            ChartSetInteger(chartId, CHART_AUTOSCROLL, true);
+        }
+        
         return true;
     }
     
-    // Metoda 4: Przesunięcie względne od aktualnej pozycji
-    if(ChartNavigate(chartId, CHART_CURRENT_POS, -barsToShift))
-    {
-        Print("[G] ✅ Nawigacja ChartNavigate(CHART_CURRENT_POS) wykonana");
-        return true;
-    }
+    // Wszystkie metody zawiodły
+    Print("[G] ❌ Nie udało się przesunąć wykresu żadną metodą");
+    Print("[G] 🔧 Błąd ChartNavigate: ", GetLastError());
+    Print("[G] 💡 Spróbuj ręcznie przejść do czasu: ", TimeToString(targetTime));
+    Print("[G] 📝 Bar do znalezienia: indeks ", targetBarIndex, " (licząc od końca)");
     
-    Print("[G] ⚠️ Nie udało się automatycznie przesunąć wykresu");
-    Print("[G] 💡 Użyj scrolla myszy lub klawiatury aby przejść do czasu: ", TimeToString(targetTime));
-    Print("[G] 📝 Sugerowane przesunięcie: ", barsToShift, " barów w lewo");
+    // Przywróć autoscroll jeśli był włączony
+    if(autoScrollWasOn)
+    {
+        ChartSetInteger(chartId, CHART_AUTOSCROLL, true);
+    }
     
     return false;
 }
@@ -660,8 +712,8 @@ void AddVerticalLineAtTime(long chartId, datetime openTime, long ticket)
     if(ObjectCreate(chartId, arrowName, arrowType, 0, openTime, arrowPrice))
     {
         // Ustaw właściwości strzałki
-        ObjectSetInteger(chartId, arrowName, OBJPROP_COLOR, clrHotPink);  // Różowy kolor
-        ObjectSetInteger(chartId, arrowName, OBJPROP_WIDTH, 4);           // Większa grubość
+        ObjectSetInteger(chartId, arrowName, OBJPROP_COLOR, clrBlack);  // Różowy kolor
+        ObjectSetInteger(chartId, arrowName, OBJPROP_WIDTH, 3);           // Większa grubość
         ObjectSetInteger(chartId, arrowName, OBJPROP_BACK, false);        // Na pierwszym planie
         
         // Dodaj opis
