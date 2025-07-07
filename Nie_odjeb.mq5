@@ -59,6 +59,9 @@ int OnInit()
     // Inicjalizacja zarządzania pozycjami
     PositionManager_Init();
     
+    // Inicjalizacja zarządzania wolumenem - NOWY SYSTEM
+    VolumeManager_Init();
+    
     // Ustawienie timera
     int timerIntervalValue = Config_GetTimerInterval();
     EventSetTimer(timerIntervalValue);
@@ -121,6 +124,9 @@ void OnTimer()
         Print("[TIMER-30s] ⏳ Monitoring przerwy i blokowanie trejdów (", TimeToString(currentTime, TIME_SECONDS), ")");
         BreakManager_MonitorAndBlockTrades();
         g_lastBreakCheck = currentTime;
+        
+        // NOWY: Regularnie czyść nieaktywne referencje volume manager
+        VolumeManager_CleanupReferences();
     }
 }
 
@@ -165,6 +171,13 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
                 case 71:   // klawisz g - toggle śledzenia edytowanej pozycji (G jak goto)
                 {
                     TogglePositionTracking();
+                    break;
+                }
+                case 86:   // klawisz v - pokaż status referencji volume manager (V jak volume)
+                {
+                    Print("=== STATUS VOLUME MANAGER ===");
+                    VolumeManager_PrintReferencesStatus();
+                    VolumeManager_CleanupReferences();
                     break;
                 }
             }
@@ -221,9 +234,16 @@ void OnTradeTransaction(const MqlTradeTransaction& trans, const MqlTradeRequest&
             
         case TRADE_TRANSACTION_ORDER_UPDATE:
             Print("Modyfikacja zlecenia: ", trans.order);
-            VolumeManager_CheckOrderStopLoss(trans.order);
-            if(Config_GetChangeVolume()) 
-                VolumeManager_AdjustVolToSL();
+            // NOWY SYSTEM: Reaguj tylko na zmiany SL, nie na wszystkie modyfikacje
+            if(VolumeManager_IsStopLossModification(trans.order))
+            {
+                Print("[MAIN] 🔄 Wykryto modyfikację SL - wywołuję nowy system");
+                VolumeManager_HandleStopLossChange(trans.order);
+            }
+            else
+            {
+                Print("[MAIN] ⚪ Modyfikacja zlecenia ", trans.order, " - nie dotyczy SL");
+            }
             break;
             
         case TRADE_TRANSACTION_POSITION:

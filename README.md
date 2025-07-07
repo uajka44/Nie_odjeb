@@ -59,15 +59,34 @@ Program został podzielony na modularne komponenty dla lepszej czytelności i ł
 - `BreakManager_HandleClosedPosition()` - obsługa zamkniętej pozycji
 - `BreakManager_SaveDateToCSV()` - zapis daty przerwy do CSV
 
-#### 5. **VolumeManager.mqh** - Zarządzanie wolumenem
+#### 5. **VolumeManager.mqh - Zarządzanie wolumenem** (PRZEPISANY)
 **Zawiera:**
-- Dostosowywanie wolumenu do wielkości stop loss
-- Sprawdzanie i modyfikacja stop loss dla oczekujących zleceń
-- Logikę przeliczania optymalnego wolumenu
+- **NOWY SYSTEM**: Dostosowywanie wolumenu na podstawie referencji pierwszego zlecenia
+- **Inteligentne wykrywanie**: Reaguje tylko na rzeczywiste modyfikacje stop lossa
+- **Zabezpieczenie przed zapętleniem**: Cooldown i ignorowanie własnych modyfikacji
+- **Pamięć referencyjna**: Zapamiętuje pierwsze ustawienia jako bazę obliczeń
+- Sprawdzanie maksymalnego stop lossa dla oczekujących zleceń
 
 **Główne funkcje:**
-- `VolumeManager_AdjustVolToSL()` - dostosowanie wolumenu do SL
-- `VolumeManager_CheckOrderStopLoss()` - sprawdzenie SL dla zleceń
+- `VolumeManager_Init()` - inicjalizacja nowego systemu
+- `VolumeManager_HandleStopLossChange()` - główna obsługa zmian SL
+- `VolumeManager_IsStopLossModification()` - wykrywanie rzeczywistych zmian SL
+- `VolumeManager_FindOrCreateReference()` - zarządzanie referencjami zleceń
+- `VolumeManager_ReplaceOrder()` - bezpieczna zamiana zlecenia z nowym wolumenem
+- `VolumeManager_CleanupReferences()` - czyszczenie nieaktywnych referencji
+- `VolumeManager_PrintReferencesStatus()` - debug i monitoring referencji
+
+**NOWA LOGIKA DZIAŁANIA:**
+1. **Przy pierwszej modyfikacji SL**: System zapamiętuje oryginalny wolumen i odległość SL jako "punkt bazowy"
+2. **Przy kolejnych zmianach SL**: Oblicza nowy wolumen według proporcji: `nowy_volume = (oryginalna_odległość_SL / nowa_odległość_SL) * oryginalny_volume`
+3. **Stała strata**: Niezależnie od pozycji SL, strata zawsze pozostaje taka sama
+4. **Przykład**: Start 1.0 lot @ 10 pkt SL → zmiana na 20 pkt SL → automatycznie 0.5 lot (strata identyczna)
+
+**ZABEZPIECZENIA:**
+- 3-sekundowy cooldown po każdej modyfikacji zapobiega zapętleniu
+- Ignorowanie zdarzeń pochodzących z własnych modyfikacji systemu
+- Weryfikacja czy to rzeczywiście zmiana SL (nie ceny czy TP)
+- Automatyczne czyszczenie referencji nieistniejących zleceń
 
 #### 6. **PositionManager.mqh** - Zarządzanie pozycjami
 **Zawiera:**
@@ -179,6 +198,47 @@ Program obsługuje następujące instrumenty z predefiniowanymi ustawieniami:
    - Możesz modyfikować SL aż do momentu wypełnienia zlecenia
    - **W momencie wypełnienia pozycji limit** program automatycznie zapamięta aktualny SL
    - Po zamknięciu pozycji SL zostanie zapisany w kolumnie `sl_recznie` (jako cena)
+3. **Ręczne sprawdzenie pozycji** (klawisz 'M'): Użyj gdy podejrzewasz, że jakieś pozycje nie zostały zapisane
+4. **Statystyki** (klawisz 'P'): Wyświetla liczbę pozycji w bazie i ostatnie 3 transakcje
+5. **NOWE: Przejście do edytowanej pozycji** (klawisz 'G'):
+   - Upewnij się, że dziennik Python jest uruchomiony
+   - Otwórz pozycję do edycji w dzienniku (podwójne kliknięcie)
+   - W MetaTrader naciśnij klawisz 'G'
+   - Program automatycznie przejdzie do wykresu edytowanej pozycji
+   - Jeśli wykres nie jest otwarty, zostaniesz poinformowany o konieczności jego otwarcia
+6. **NOWE: Volume Manager Debug** (klawisz 'V'):
+   - Wyświetla status wszystkich aktywnych referencji zleceń
+   - Pokazuje oryginalne i aktualne parametry volume/SL
+   - Czyści nieaktywne referencje
+   - Przydatne do debugowania problemu z wolumenem
+7. **NOWE: Automatyczne zarządzanie wolumenem**:
+   - **Pierwsza modyfikacja SL**: System zapamiętuje jako punkt bazowy
+   - **Kolejne zmiany**: Automatyczne przeliczanie wolumenu (stała strata)
+   - **Przykład**: 1 lot @ 10 pkt SL → zmiana na 5 pkt SL → automatycznie 2 loty
+   - **Zabezpieczenia**: 3-sekundowy cooldown zapobiega zapętleniu
+8. **Optymalizacja**: Program sprawdza tylko pozycje nowsze niż ostatnia w bazie (incremental update)
+
+## NOWE: Instrukcje Volume Manager
+
+### Jak korzystać z nowego systemu zarządzania wolumenem:
+
+1. **Ustaw pierwsze zlecenie** w dowolnym oknie (może być inny EA lub ręcznie)
+   - Przykład: 1.5 lot z SL 10 punktów
+   
+2. **Przenieś stop loss** - system automatycznie dostosuje wolumen:
+   - SL na 20 pkt → wolumen zmieni się na 0.75 lot (strata identyczna)
+   - SL na 5 pkt → wolumen zmieni się na 3.0 lot (strata identyczna)
+   
+3. **Monitoring**: Użyj klawisza 'V' aby zobaczyć aktywne referencje
+
+4. **Debugging**: Obserwuj logi w konsoli - każda operacja jest dokładnie logowana
+
+### Uwagi dotyczące nowego systemu:
+- ✅ **Działa**: Tylko z oczekującymi zleceniami LIMIT (nie MARKET)
+- ✅ **Elastyczność**: Pierwszy volume może być ustawiony w dowolny sposób
+- ✅ **Bezpieczeństwo**: System ma zabezpieczenia przed zapętleniem
+- ⚠️ **Ograniczenia**: Respektuje min/max volume dla każdego symbolu
+- 🔄 **Restart**: Po restarcie MT5 system zapomina referencje (zgodnie z wymaganiami)
 3. **Ręczne sprawdzenie pozycji** (klawisz 'M'): Użyj gdy podejrzewasz, że jakieś pozycje nie zostały zapisane
 4. **Statystyki** (klawisz 'P'): Wyświetla liczbę pozycji w bazie i ostatnie 3 transakcje
 5. **NOWE: Przejście do edytowanej pozycji** (klawisz 'G'):
