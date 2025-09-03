@@ -148,6 +148,32 @@ void VolumeManager_HandleStopLossChange(ulong ticket)
         return;
     }
     
+    // NAJPIERW sprawdź maksymalny SL (niezależnie od wolumenu!)
+    if(!VolumeManager_CheckMaxStopLoss(ticket, symbol, openPrice, currentSL, orderType))
+    {
+        Print("[VOLUME] ⚠️ SL przekroczył maksimum - zostało skorygowane");
+        
+        // Po korekcji SL musimy ponownie odczytać aktualne wartości
+        if(OrderSelect(ticket))
+        {
+            double correctedSL = OrderGetDouble(ORDER_SL);
+            double correctedSLDistance = 0;
+            if(orderType == ORDER_TYPE_BUY_LIMIT)
+                correctedSLDistance = openPrice - correctedSL;
+            else if(orderType == ORDER_TYPE_SELL_LIMIT)
+                correctedSLDistance = correctedSL - openPrice;
+                
+            // Aktualizuj referencję z poprawnymi wartościami
+            g_orderReferences[refIndex].last_sl_distance = correctedSLDistance;
+            g_orderReferences[refIndex].last_modification = TimeCurrent();
+            
+            Print("[VOLUME] ✅ SL skorygowane do ", correctedSLDistance, " pkt");
+        }
+        
+        // Jeśli SL zostało skorygowane, nie zmieniamy wolumenu
+        return;
+    }
+    
     // Oblicz nowy wolumen na podstawie proporcji
     double newVolume = (ref.original_sl_distance / currentSLDistance) * ref.original_volume;
     
@@ -162,20 +188,13 @@ void VolumeManager_HandleStopLossChange(ulong ticket)
     // Sprawdź czy wolumen rzeczywiście się zmienił
     if(MathAbs(newVolume - currentVolume) < 0.001)
     {
-        Print("[VOLUME] ✅ Wolumen już jest poprawny (", newVolume, ")");
+        Print("[VOLUME] ✅ Wolumen już jest poprawny (", newVolume, ") - SL w limicie ", Config_GetMaxSLForSymbol(symbol), " pkt");
         g_orderReferences[refIndex].last_sl_distance = currentSLDistance;
         g_orderReferences[refIndex].last_modification = TimeCurrent();
         return;
     }
     
     Print("[VOLUME] 🔄 Zmieniam wolumen z ", currentVolume, " na ", newVolume);
-    
-    // Sprawdź maksymalny SL przed modyfikacją
-    if(!VolumeManager_CheckMaxStopLoss(ticket, symbol, openPrice, currentSL, orderType))
-    {
-        Print("[VOLUME] ⚠️ SL zbyt duży - nie zmieniam wolumenu");
-        return;
-    }
     
     // Wykonaj zamianę zlecenia
     if(VolumeManager_ReplaceOrder(ticket, symbol, openPrice, newVolume, currentSL, currentTP, orderType))
@@ -293,6 +312,7 @@ bool VolumeManager_CheckMaxStopLoss(ulong ticket, string symbol, double openPric
         if(g_Trade.OrderModify(ticket, openPrice, correctedSL, OrderGetDouble(ORDER_TP), ORDER_TIME_GTC, 0))
         {
             Print("[VOLUME] ✅ SL skorygowany z ", currentSLDistance, " do ", maxSLPoints, " pkt");
+            return false; // Zwracamy false bo SL zostało skorygowane (było za duże)
         }
         else
         {
@@ -301,7 +321,7 @@ bool VolumeManager_CheckMaxStopLoss(ulong ticket, string symbol, double openPric
         }
     }
     
-    return true;
+    return true; // SL jest w porządku
 }
 
 //+------------------------------------------------------------------+
